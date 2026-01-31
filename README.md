@@ -8,6 +8,7 @@ This plugin is a fork of [zsh-better-npm-completion](https://github.com/lukechil
 
 * Makes `pnpm install` recommendations from pnpm cache
 * Makes `pnpm uninstall` recommendations from `dependencies`/`devDependencies`
+* Adds workspace package name completion for `--filter`/`-F`
 * Shows detailed information on script contents for `pnpm run`
 * Falls back to default pnpm completions if we don't have anything better
 
@@ -60,6 +61,10 @@ Then source it in your `.zshrc`
 ```shell
 source ~/.zsh-better-pnpm-completion/zsh-better-pnpm-completion.plugin.zsh
 ```
+
+## Troubleshooting
+
+If pnpm's own completion behaves strangely, ensure you removed older `__tabtab`-based setup from your shell config. pnpm's docs note the v9+ completion isn't compatible with older `__tabtab` initialization.
 
 ## License
 

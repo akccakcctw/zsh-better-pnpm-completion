@@ -11,7 +11,34 @@ _zbpc_no_of_pnpm_args() {
 }
 
 _zbpc_list_cached_modules() {
-  ls $(pnpm store path) 2>/dev/null
+  local store_path
+  store_path="$(pnpm store path 2>/dev/null)" || return
+  [[ "$store_path" = "" ]] && return
+
+  local metadata_dir="$store_path/metadata"
+  if [[ -d "$metadata_dir" ]]; then
+    local -a files packages
+    files=(${(f)"$(find "$metadata_dir" -mindepth 2 -maxdepth 3 -type f 2>/dev/null)"})
+    [[ "$#files" -eq 0 ]] && return
+    local file rel
+    for file in "${files[@]}"; do
+      rel="${file#$metadata_dir/}"
+      rel="${rel#*/}"
+      rel="${rel%.json}"
+      if [[ "$rel" == */*/* ]]; then
+        local maybe_version="${rel##*/}"
+        if [[ "$maybe_version" == [0-9]* ]]; then
+          rel="${rel%/*}"
+        fi
+      fi
+      [[ "$rel" = "" ]] && continue
+      packages+=("$rel")
+    done
+    print -rl -- ${packages[@]} | sort -u
+    return
+  fi
+
+  ls "$store_path" 2>/dev/null
 }
 
 _zbpc_recursively_look_for() {
@@ -27,6 +54,24 @@ _zbpc_recursively_look_for() {
 _zbpc_get_package_json_property_object() {
   local package_json="$1"
   local property="$2"
+  if command -v node >/dev/null 2>&1; then
+    node -e '
+      const fs = require("fs");
+      const file = process.argv[1];
+      const prop = process.argv[2];
+      try {
+        const data = JSON.parse(fs.readFileSync(file, "utf8"));
+        const obj = data && data[prop];
+        if (!obj || typeof obj !== "object") process.exit(0);
+        for (const [k, v] of Object.entries(obj)) {
+          const value = typeof v === "string" ? v : JSON.stringify(v);
+          console.log(`${k}=>${value}`);
+        }
+      } catch {}
+    ' "$package_json" "$property" 2>/dev/null
+    return
+  fi
+
   cat "$package_json" |
     sed -nE "/^  \"$property\": \{$/,/^  \},?$/p" | # Grab scripts object
     sed '1d;$d' |                                   # Remove first/last lines
@@ -51,6 +96,68 @@ _zbpc_parse_package_json_for_deps() {
   local package_json="$1"
   _zbpc_get_package_json_property_object_keys "$package_json" dependencies
   _zbpc_get_package_json_property_object_keys "$package_json" devDependencies
+  _zbpc_get_package_json_property_object_keys "$package_json" optionalDependencies
+  _zbpc_get_package_json_property_object_keys "$package_json" peerDependencies
+}
+
+_zbpc_list_workspace_packages() {
+  local workspace_file
+  workspace_file="$(_zbpc_recursively_look_for pnpm-workspace.yaml)"
+  [[ "$workspace_file" = "" ]] && return
+
+  local workspace_root="${workspace_file%/*}"
+  local json
+  json="$(pnpm -C "$workspace_root" list -r --depth -1 --json 2>/dev/null)" || return
+  [[ "$json" = "" ]] && return
+
+  if command -v node >/dev/null 2>&1; then
+    echo "$json" | node -e '
+      const fs = require("fs");
+      const input = fs.readFileSync(0, "utf8").trim();
+      if (!input) process.exit(0);
+      let data;
+      try { data = JSON.parse(input); } catch { process.exit(0); }
+      if (!Array.isArray(data)) data = [data];
+      const names = new Set();
+      for (const pkg of data) {
+        if (pkg && pkg.name) names.add(pkg.name);
+      }
+      console.log([...names].join("\n"));
+    ' 2>/dev/null
+  fi
+}
+
+_zbpc_pnpm_filter_completion() {
+  local prev="${words[$((CURRENT-1))]}"
+  local cur="${words[$CURRENT]}"
+  local -a options
+
+  case "$prev" in
+    --filter|-F)
+      options=(${(f)"$(_zbpc_list_workspace_packages)"})
+      [[ "$#options" -eq 0 ]] && return
+      _values $options
+      custom_completion=true
+      return
+      ;;
+  esac
+
+  case "$cur" in
+    --filter=*)
+      options=(${(f)"$(_zbpc_list_workspace_packages)"})
+      [[ "$#options" -eq 0 ]] && return
+      compadd -P '--filter=' -- ${options[@]}
+      custom_completion=true
+      return
+      ;;
+    -F=*)
+      options=(${(f)"$(_zbpc_list_workspace_packages)"})
+      [[ "$#options" -eq 0 ]] && return
+      compadd -P '-F=' -- ${options[@]}
+      custom_completion=true
+      return
+      ;;
+  esac
 }
 
 _zbpc_pnpm_install_completion() {
@@ -110,18 +217,77 @@ _zbpc_pnpm_run_completion() {
   custom_completion=true
 }
 
+_zbpc_format_pnpm_completions() {
+  local -a formatted
+  local item
+
+  for item in "$@"; do
+    if [[ "$item" == -* ]]; then
+      formatted+=("\\${item}")
+    else
+      formatted+=("${item}")
+    fi
+  done
+
+  print -rl -- "${(i)formatted[@]}"
+}
+
+_zbpc_pnpm_complete_options_or_commands() {
+  local current_word="${words[CURRENT]}"
+  local stop_parse_index=$words[(Ie)--]
+  local -a formatted
+  local type
+
+  # Skip completion after "--"
+  if [[ $stop_parse_index != 0 && $CURRENT > stop_parse_index ]]; then
+    return 1
+  fi
+
+  formatted=(${(f)"$(_zbpc_format_pnpm_completions "$@")"})
+  [[ "$#formatted" -eq 0 ]] && return 1
+
+  if [[ $current_word == -* ]]; then
+    type="options"
+  else
+    type="commands"
+  fi
+
+  _describe $type formatted
+}
+
 _zbpc_default_pnpm_completion() {
+  local reply
+  local si=$IFS
+  IFS=$'\n' reply=($(COMP_CWORD="$((CURRENT-1))" \
+    COMP_LINE="$BUFFER" \
+    COMP_POINT="$CURSOR" \
+    SHELL=zsh \
+    pnpm completion-server -- "${words[@]}" 2>/dev/null))
+  IFS=$si
+
+  if [[ "$#reply" -eq 1 && "$reply[1]" = "__tabtab_complete_files__" ]]; then
+    _files
+    return
+  fi
+
+  if [[ "$#reply" -gt 0 ]]; then
+    _zbpc_pnpm_complete_options_or_commands "${reply[@]}" && return
+  fi
+
   compadd -- $(COMP_CWORD=$((CURRENT-1)) \
-              COMP_LINE=$BUFFER \
-              COMP_POINT=0 \
-              pnpm completion -- "${words[@]}" \
-              2>/dev/null)
+    COMP_LINE=$BUFFER \
+    COMP_POINT=$CURSOR \
+    pnpm completion -- "${words[@]}" 2>/dev/null)
 }
 
 _zbpc_zsh_better_pnpm_completion() {
 
   # Store custom completion status
   local custom_completion=false
+
+  # Complete workspace filters like --filter/-F
+  _zbpc_pnpm_filter_completion
+  [[ $custom_completion = true ]] && return
 
   # Load custom completion commands
   case "$(_zbpc_pnpm_command)" in
