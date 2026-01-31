@@ -232,6 +232,32 @@ _zbpc_format_pnpm_completions() {
   print -rl -- "${(i)formatted[@]}"
 }
 
+_zbpc_list_pnpm_commands_from_help() {
+  local help
+  help="$(pnpm help -a 2>/dev/null)"
+  [[ "$help" = "" ]] && help="$(pnpm --help 2>/dev/null)"
+  [[ "$help" = "" ]] && return
+
+  echo "$help" | awk '
+    /^[[:space:]]*[a-z][a-z0-9-]*(, [a-z][a-z0-9-]*)*[[:space:]]{2,}/ {
+      line=$0
+      sub(/^[[:space:]]*/, "", line)
+      split(line, parts, /  +/)
+      cmds=parts[1]
+      gsub(/, /, "\n", cmds)
+      print cmds
+    }
+  ' | sort -u
+}
+
+_zbpc_pnpm_root_command_completion() {
+  local -a options
+  options=(${(f)"$(_zbpc_list_pnpm_commands_from_help)"})
+  [[ "$#options" -eq 0 ]] && return 1
+  _describe 'commands' options
+  return 0
+}
+
 _zbpc_pnpm_complete_options_or_commands() {
   local current_word="${words[CURRENT]}"
   local stop_parse_index=$words[(Ie)--]
@@ -266,12 +292,19 @@ _zbpc_default_pnpm_completion() {
   IFS=$si
 
   if [[ "$#reply" -eq 1 && "$reply[1]" = "__tabtab_complete_files__" ]]; then
+    if [[ "$(_zbpc_no_of_pnpm_args)" = "2" && "${words[CURRENT]}" != -* ]]; then
+      _zbpc_pnpm_root_command_completion && return
+    fi
     _files
     return
   fi
 
   if [[ "$#reply" -gt 0 ]]; then
     _zbpc_pnpm_complete_options_or_commands "${reply[@]}" && return
+  fi
+
+  if [[ "$(_zbpc_no_of_pnpm_args)" = "2" && "${words[CURRENT]}" != -* ]]; then
+    _zbpc_pnpm_root_command_completion && return
   fi
 
   compadd -- $(COMP_CWORD=$((CURRENT-1)) \
